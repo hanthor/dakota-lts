@@ -8,20 +8,68 @@
 # kernel drops in via the standard /usr/lib/modules/ path and BLS entries.
 # No bootupd, no shim, no GRUB needed.
 #
-# Secure Boot is NOT enforced — Dakota ships no shim. For SB use :latest
-# (GRUB chain) or :uki (shim 16.1 → AlmaLinux signed UKI).
+# Composefs-native is supported: the AlmaLinux kernel's initramfs is rebuilt
+# with bootc's 51bootc dracut module (bootc-root-setup.service +
+# initramfs-setup) so the composefs=?<hash> boot argument is handled
+# correctly. Without this module AlmaLinux's ostree-prepare-root uses the old
+# ostree-repo path and fails to mount the composefs-native sysroot.
 #
-# For composefs + systemd-boot, install fresh via fisherman:
-#   {"bootloader":"systemd","composeFsBackend":true,"image":"...:sdboot"}
-# fisherman handles the ext4 verity flag and root partition DDI GUID retagging
-# that make composefs work with systemd-boot's GPT auto-discovery.
+# For Secure Boot use :latest (GRUB chain) or :uki (shim 16.1 → AlmaLinux UKI).
+
+# Stage 1: AlmaLinux 10 — source of signed kernel and modules
 FROM quay.io/almalinuxorg/almalinux-bootc:10 AS alma
 
+# Stage 2: Dakota — source of bootc dracut module (51bootc)
+FROM ghcr.io/projectbluefin/dakota:latest AS dakota
+
+# Stage 3: Rebuild the AlmaLinux initramfs with the bootc dracut module.
+# This must run in an AlmaLinux environment (has dracut + AlmaLinux glibc so
+# library paths in the rebuilt initramfs are correct).
+FROM quay.io/almalinuxorg/almalinux-bootc:10 AS initramfs-builder
+
+# Copy bootc's dracut components from Dakota into the AlmaLinux build env.
+# The 51bootc module installs: erofs+overlay kmod, initramfs-setup binary,
+# and bootc-root-setup.service which mounts the composefs-native sysroot.
+COPY --from=dakota /usr/lib/dracut/modules.d/51bootc/ \
+                   /usr/lib/dracut/modules.d/51bootc/
+COPY --from=dakota /usr/lib/bootc/initramfs-setup \
+                   /usr/lib/bootc/initramfs-setup
+COPY --from=dakota /usr/lib/systemd/system/bootc-root-setup.service \
+                   /usr/lib/systemd/system/bootc-root-setup.service
+
+# Rebuild initramfs for the AlmaLinux kernel, adding the bootc module.
+# --add bootc enables the 51bootc module (it opts out of auto-install via
+# check()=255 so must be requested explicitly).
+# Create the dracut.conf.d file that opts the base image into the 51bootc module.
+# The 51bootc module includes bootc-root-setup.service which needs /root to exist.
+RUN mkdir -p /root && \
+    echo 'add_dracutmodules+=" bootc "' > /etc/dracut.conf.d/10-bootc-base.conf
+
+# Rebuild initramfs; the conf above enables 51bootc which installs erofs+overlay
+# modules and bootc-root-setup.service (handles composefs-native sysroot mount).
+RUN KVER=$(ls /usr/lib/modules | head -1) && \
+    dracut --reproducible --force \
+           --no-hostonly \
+           --no-early-microcode \
+           --kver "${KVER}" \
+           /usr/lib/modules/${KVER}/initramfs.img 2>&1 | \
+           grep -Ev "No '/dev/log'|^$"
+
+# Stage 4: Final image — Dakota userspace + AlmaLinux kernel + rebuilt initramfs
 FROM ghcr.io/projectbluefin/dakota:latest
 
 # Swap kernel: remove Dakota's source-built kernel, drop in AlmaLinux 6.12 LTS.
 RUN find /usr/lib/modules -maxdepth 1 -mindepth 1 -type d -exec rm -rf {} +
-COPY --from=alma /usr/lib/modules/ /usr/lib/modules/
+COPY --from=initramfs-builder /usr/lib/modules/ /usr/lib/modules/
+
+# Also bring in the bootc dracut components so future initramfs rebuilds
+# (e.g. after a kernel update via bootc upgrade) include the bootc module.
+COPY --from=dakota /usr/lib/dracut/modules.d/51bootc/ \
+                   /usr/lib/dracut/modules.d/51bootc/
+COPY --from=dakota /usr/lib/bootc/initramfs-setup \
+                   /usr/lib/bootc/initramfs-setup
+COPY --from=dakota /usr/lib/systemd/system/bootc-root-setup.service \
+                   /usr/lib/systemd/system/bootc-root-setup.service
 
 # Stamp kernel version into os-release.
 RUN KVER=$(ls /usr/lib/modules | head -1) \
