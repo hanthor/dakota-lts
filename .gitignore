@@ -1,0 +1,6 @@
+*.raw
+*.qcow2
+.ovmf-vars.fd
+logs/
+client.crt
+client.key
