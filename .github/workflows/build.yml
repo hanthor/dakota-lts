@@ -12,7 +12,6 @@ on:
   workflow_dispatch:
 
 env:
-  IMAGE_NAME: dakota-lts
   IMAGE_REGISTRY: ghcr.io/${{ github.repository_owner }}
 
 concurrency:
@@ -21,11 +20,28 @@ concurrency:
 
 jobs:
   build:
+    name: Build ${{ matrix.variant.name }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
-      id-token: write  # required for cosign keyless / OIDC
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - name: dakota-lts
+            containerfile: Containerfile
+            tag: latest
+            description: "GRUB + shim Secure Boot, fresh install"
+          - name: dakota-lts
+            containerfile: Containerfile.sdboot
+            tag: sdboot
+            description: "systemd-boot, bootc switch compatible, no SB enforcement"
+          - name: dakota-lts
+            containerfile: Containerfile.uki
+            tag: uki
+            description: "shim 16.1 → AlmaLinux signed UKI, no GRUB, full SB"
 
     steps:
       - name: Checkout repository
@@ -35,9 +51,6 @@ jobs:
         id: timestamp
         run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
-      # Detect the AlmaLinux kernel version baked into the image.
-      # Stamped into image tags and OCI labels so every published image
-      # is traceable to the exact kernel it ships.
       - name: Detect AlmaLinux kernel version
         id: kver
         run: |
@@ -46,21 +59,24 @@ jobs:
           echo "kver=${KVER}" >> "$GITHUB_OUTPUT"
           echo "Detected AlmaLinux kernel: ${KVER}"
 
-      - name: Build image
+      - name: Build image (${{ matrix.variant.tag }})
         run: |
           podman build \
             --pull=newer \
+            -f ${{ matrix.variant.containerfile }} \
             --label org.opencontainers.image.created=${{ steps.timestamp.outputs.created }} \
             --label org.opencontainers.image.revision=${{ github.sha }} \
             --label org.opencontainers.image.version=${{ steps.kver.outputs.kver }} \
+            --label org.opencontainers.image.description="${{ matrix.variant.description }}" \
             --label org.projectbluefin.alma.kernel=${{ steps.kver.outputs.kver }} \
-            -t "${{ env.IMAGE_NAME }}:latest" \
+            --label org.projectbluefin.alma.variant=${{ matrix.variant.tag }} \
+            -t "${{ matrix.variant.name }}:${{ matrix.variant.tag }}" \
             .
 
       - name: Validate with bootc container lint
         run: |
           podman run --rm --privileged \
-            "${{ env.IMAGE_NAME }}:latest" \
+            "${{ matrix.variant.name }}:${{ matrix.variant.tag }}" \
             bootc container lint
 
       - name: Login to GHCR
@@ -81,30 +97,32 @@ jobs:
         run: |
           KVER="${{ steps.kver.outputs.kver }}"
           DATE="$(date -u +%Y%m%d)"
-          for tag in latest "${KVER}" "${DATE}" "${{ github.sha }}"; do
-            podman tag "${{ env.IMAGE_NAME }}:latest" \
-              "${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${tag}"
+          TAG="${{ matrix.variant.tag }}"
+          BASE="${{ env.IMAGE_REGISTRY }}/${{ matrix.variant.name }}"
+
+          # Tag with variant suffix, kernel version, and date
+          for tag in "${TAG}" "${TAG}-${KVER}" "${TAG}-${DATE}" "${TAG}-${{ github.sha }}"; do
+            podman tag "${{ matrix.variant.name }}:${TAG}" "${BASE}:${tag}"
           done
-          for tag in latest "${KVER}" "${DATE}" "${{ github.sha }}"; do
+          # :latest is an alias for the grub variant (most conservative/safe)
+          if [ "${TAG}" = "latest" ]; then
+            podman tag "${{ matrix.variant.name }}:${TAG}" "${BASE}:latest"
+          fi
+
+          for tag in "${TAG}" "${TAG}-${KVER}" "${TAG}-${DATE}" "${TAG}-${{ github.sha }}"; do
             for attempt in 1 2 3; do
               podman push --compression-format=zstd \
-                "${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${tag}" && break
+                "${BASE}:${tag}" && break
               echo "Push attempt ${attempt} failed for ${tag}, retrying..."
               sleep $((attempt * 5))
             done
           done
-          # Capture digest of the :latest push for signing
-          DIGEST=$(podman inspect \
-            "${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:latest" \
-            --format '{{.Digest}}' 2>/dev/null || \
-            skopeo inspect --raw \
-              "docker://${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:latest" \
-            | sha256sum | awk '{print "sha256:"$1}')
+
+          DIGEST=$(skopeo inspect --raw "docker://${BASE}:${TAG}" \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['config']['digest'])" 2>/dev/null \
+            || podman inspect "${BASE}:${TAG}" --format '{{.Digest}}' 2>/dev/null || true)
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
 
-      # Sign the pushed image with cosign using the repo's SIGNING_SECRET key.
-      # The matching public key lives at cosign.pub in the repo root so users
-      # can verify: cosign verify --key cosign.pub <image>@<digest>
       - name: Install cosign
         if: >-
           github.event_name == 'merge_group' ||
@@ -122,6 +140,7 @@ jobs:
           COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
           COSIGN_PASSWORD: ""
           DIGEST: ${{ steps.push.outputs.digest }}
+          TAG: ${{ matrix.variant.tag }}
         run: |
           cosign sign -y \
             --new-bundle-format=false \
@@ -129,4 +148,4 @@ jobs:
             --key env://COSIGN_PRIVATE_KEY \
             --registry-username ${{ github.actor }} \
             --registry-password ${{ secrets.GITHUB_TOKEN }} \
-            "${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}@${DIGEST}"
+            "${{ env.IMAGE_REGISTRY }}/${{ matrix.variant.name }}:${TAG}"
