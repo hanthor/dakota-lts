@@ -25,6 +25,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write  # required for cosign keyless / OIDC
 
     steps:
       - name: Checkout repository
@@ -34,17 +35,14 @@ jobs:
         id: timestamp
         run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
-      # Detect the AlmaLinux kernel version that will be baked in.
-      # We pull the alma image, install kernel-uki-virt, and read the
-      # resulting module directory name — same logic the Containerfile uses.
-      # This value is stamped into the image tag and OCI labels so every
-      # published image is traceable to the exact kernel it ships.
+      # Detect the AlmaLinux kernel version baked into the image.
+      # Stamped into image tags and OCI labels so every published image
+      # is traceable to the exact kernel it ships.
       - name: Detect AlmaLinux kernel version
         id: kver
         run: |
           KVER=$(podman run --rm quay.io/almalinuxorg/almalinux-bootc:10 \
-            bash -c 'dnf install -y --quiet kernel-uki-virt 2>/dev/null; \
-                     ls /usr/lib/modules | grep el10 | tail -1')
+            bash -c 'ls /usr/lib/modules | grep el10 | tail -1')
           echo "kver=${KVER}" >> "$GITHUB_OUTPUT"
           echo "Detected AlmaLinux kernel: ${KVER}"
 
@@ -75,21 +73,58 @@ jobs:
             podman login ghcr.io --username ${{ github.actor }} --password-stdin
 
       - name: Tag and push to GHCR
+        id: push
         if: >-
           github.event_name == 'merge_group' ||
           github.event_name == 'schedule'    ||
           github.event_name == 'workflow_dispatch'
         run: |
           KVER="${{ steps.kver.outputs.kver }}"
-          for tag in latest "${KVER}" "${{ github.sha }}"; do
+          DATE="$(date -u +%Y%m%d)"
+          for tag in latest "${KVER}" "${DATE}" "${{ github.sha }}"; do
             podman tag "${{ env.IMAGE_NAME }}:latest" \
               "${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${tag}"
           done
-          for tag in latest "${KVER}" "${{ github.sha }}"; do
+          for tag in latest "${KVER}" "${DATE}" "${{ github.sha }}"; do
             for attempt in 1 2 3; do
               podman push --compression-format=zstd \
                 "${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${tag}" && break
               echo "Push attempt ${attempt} failed for ${tag}, retrying..."
-              sleep 5
+              sleep $((attempt * 5))
             done
           done
+          # Capture digest of the :latest push for signing
+          DIGEST=$(podman inspect \
+            "${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:latest" \
+            --format '{{.Digest}}' 2>/dev/null || \
+            skopeo inspect --raw \
+              "docker://${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:latest" \
+            | sha256sum | awk '{print "sha256:"$1}')
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      # Sign the pushed image with cosign using the repo's SIGNING_SECRET key.
+      # The matching public key lives at cosign.pub in the repo root so users
+      # can verify: cosign verify --key cosign.pub <image>@<digest>
+      - name: Install cosign
+        if: >-
+          github.event_name == 'merge_group' ||
+          github.event_name == 'schedule'    ||
+          github.event_name == 'workflow_dispatch'
+        uses: sigstore/cosign-installer@cad07c2e89fa2edd6e2d7bab4c1aa38e53f76003 # v3.7.0
+
+      - name: Sign image with cosign
+        if: >-
+          (github.event_name == 'merge_group' ||
+           github.event_name == 'schedule'    ||
+           github.event_name == 'workflow_dispatch') &&
+          secrets.SIGNING_SECRET != ''
+        env:
+          COSIGN_EXPERIMENTAL: false
+          COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          cosign sign -y \
+            --new-bundle-format=false \
+            --use-signing-config=false \
+            --key env://COSIGN_PRIVATE_KEY \
+            "${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}@${DIGEST}"
