@@ -1,0 +1,95 @@
+name: Build dakota-lts
+
+on:
+  schedule:
+    # Daily at 15:00 UTC — after Dakota's 13:00 UTC build finishes and
+    # after AlmaLinux's nightly kernel updates land.
+    - cron: '0 15 * * *'
+  pull_request:
+    branches: [main]
+  merge_group:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: dakota-lts
+  IMAGE_REGISTRY: ghcr.io/${{ github.repository_owner }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Capture build timestamp
+        id: timestamp
+        run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      # Detect the AlmaLinux kernel version that will be baked in.
+      # We pull the alma image, install kernel-uki-virt, and read the
+      # resulting module directory name — same logic the Containerfile uses.
+      # This value is stamped into the image tag and OCI labels so every
+      # published image is traceable to the exact kernel it ships.
+      - name: Detect AlmaLinux kernel version
+        id: kver
+        run: |
+          KVER=$(podman run --rm quay.io/almalinuxorg/almalinux-bootc:10 \
+            bash -c 'dnf install -y --quiet kernel-uki-virt 2>/dev/null; \
+                     ls /usr/lib/modules | grep el10 | tail -1')
+          echo "kver=${KVER}" >> "$GITHUB_OUTPUT"
+          echo "Detected AlmaLinux kernel: ${KVER}"
+
+      - name: Build image
+        run: |
+          podman build \
+            --pull=newer \
+            --label org.opencontainers.image.created=${{ steps.timestamp.outputs.created }} \
+            --label org.opencontainers.image.revision=${{ github.sha }} \
+            --label org.opencontainers.image.version=${{ steps.kver.outputs.kver }} \
+            --label org.projectbluefin.alma.kernel=${{ steps.kver.outputs.kver }} \
+            -t "${{ env.IMAGE_NAME }}:latest" \
+            .
+
+      - name: Validate with bootc container lint
+        run: |
+          podman run --rm --privileged \
+            "${{ env.IMAGE_NAME }}:latest" \
+            bootc container lint
+
+      - name: Login to GHCR
+        if: >-
+          github.event_name == 'merge_group' ||
+          github.event_name == 'schedule'    ||
+          github.event_name == 'workflow_dispatch'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            podman login ghcr.io --username ${{ github.actor }} --password-stdin
+
+      - name: Tag and push to GHCR
+        if: >-
+          github.event_name == 'merge_group' ||
+          github.event_name == 'schedule'    ||
+          github.event_name == 'workflow_dispatch'
+        run: |
+          KVER="${{ steps.kver.outputs.kver }}"
+          for tag in latest "${KVER}" "${{ github.sha }}"; do
+            podman tag "${{ env.IMAGE_NAME }}:latest" \
+              "${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${tag}"
+          done
+          for tag in latest "${KVER}" "${{ github.sha }}"; do
+            for attempt in 1 2 3; do
+              podman push --compression-format=zstd \
+                "${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${tag}" && break
+              echo "Push attempt ${attempt} failed for ${tag}, retrying..."
+              sleep 5
+            done
+          done
