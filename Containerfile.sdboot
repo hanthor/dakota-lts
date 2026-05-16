@@ -1,34 +1,34 @@
 # dakota-lts:sdboot — AlmaLinux 6.12 LTS kernel on Dakota's systemd-boot stack
 #
-# This variant is designed for `bootc switch` from a running Dakota install:
+# Designed for `bootc switch` from a running Dakota install:
 #
 #   sudo bootc switch ghcr.io/hanthor/dakota-lts:sdboot
 #
-# It does NOT change the bootloader on the ESP. Dakota's existing systemd-boot
-# stays in place and picks up the new AlmaLinux kernel via BLS entries, as it
-# would any other kernel update. Secure Boot is NOT enforced (Dakota ships no
-# shim), but the AlmaLinux 6.12 LTS kernel is otherwise fully functional.
+# Dakota's existing systemd-boot stays on the ESP unchanged. The AlmaLinux
+# kernel drops in via the standard /usr/lib/modules/ path and BLS entries.
+# No bootupd, no shim, no GRUB needed.
 #
-# For Secure Boot support, use ghcr.io/hanthor/dakota-lts:latest (GRUB chain)
-# or ghcr.io/hanthor/dakota-lts:uki (shim → UKI direct).
+# Secure Boot is NOT enforced — Dakota ships no shim. For SB use :latest
+# (GRUB chain) or :uki (shim 16.1 → AlmaLinux signed UKI).
+#
+# For composefs + systemd-boot, install fresh via fisherman:
+#   {"bootloader":"systemd","composeFsBackend":true,"image":"...:sdboot"}
+# fisherman handles the ext4 verity flag and root partition DDI GUID retagging
+# that make composefs work with systemd-boot's GPT auto-discovery.
 FROM quay.io/almalinuxorg/almalinux-bootc:10 AS alma
 
-# Stage 2: Dakota userspace, AlmaLinux kernel, Dakota's own systemd-boot
 FROM ghcr.io/projectbluefin/dakota:latest
 
-# Remove the Dakota source-built kernel.
+# Swap kernel: remove Dakota's source-built kernel, drop in AlmaLinux 6.12 LTS.
 RUN find /usr/lib/modules -maxdepth 1 -mindepth 1 -type d -exec rm -rf {} +
-
-# Drop in the AlmaLinux kernel: vmlinuz, initramfs.img, full module tree.
-# Dakota's systemd-boot reads these via BLS entries — no bootloader change needed.
 COPY --from=alma /usr/lib/modules/ /usr/lib/modules/
 
-# Stamp the AlmaLinux kernel version into os-release for visibility.
+# Stamp kernel version into os-release.
 RUN KVER=$(ls /usr/lib/modules | head -1) \
  && sed -i "s|^KERNEL_VERSION=.*|KERNEL_VERSION=\"${KVER}\"|" /usr/lib/os-release 2>/dev/null \
  || echo "KERNEL_VERSION=\"${KVER}\"" >> /usr/lib/os-release
 
-# Enable sshd for debug builds — gate with --build-arg SSH_PUBKEY="$(cat ~/.ssh/id_ed25519.pub)"
+# Debug builds only: gate with --build-arg SSH_PUBKEY="$(cat ~/.ssh/id_ed25519.pub)"
 ARG SSH_PUBKEY=""
 RUN if [ -n "$SSH_PUBKEY" ]; then \
       systemctl enable sshd.service \
