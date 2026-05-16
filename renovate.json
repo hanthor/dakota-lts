@@ -1,0 +1,56 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits",
+    ":automergeMinor"
+  ],
+  "dependencyDashboard": true,
+  "prHourlyLimit": 0,
+  "prConcurrentLimit": 10,
+  "packageRules": [
+    {
+      "description": "Automerge all GitHub Actions digest pins",
+      "matchManagers": ["github-actions"],
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true
+    },
+    {
+      "description": "Automerge container base image updates",
+      "matchManagers": ["dockerfile"],
+      "matchDepNames": [
+        "quay.io/almalinuxorg/almalinux-bootc",
+        "ghcr.io/projectbluefin/dakota"
+      ],
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true
+    },
+    {
+      "description": "Require review for major updates",
+      "matchUpdateTypes": ["major"],
+      "automerge": false
+    }
+  ],
+  "dockerfile": {
+    "enabled": true,
+    "fileMatch": ["(^|/)Containerfile$", "(^|/)Containerfile\\..*$", "(^|/)Dockerfile$"]
+  },
+  "github-actions": {
+    "enabled": true
+  },
+  "regexManagers": [
+    {
+      "description": "Update cosign-installer action SHA in build.yml",
+      "fileMatch": ["^\\.github/workflows/.*\\.yml$"],
+      "matchStrings": [
+        "sigstore/cosign-installer@(?<currentDigest>[a-f0-9]+)\\s*#\\s*v(?<currentValue>[\\d.]+)"
+      ],
+      "depNameTemplate": "sigstore/cosign-installer",
+      "datasourceTemplate": "github-releases",
+      "versioningTemplate": "semver"
+    }
+  ]
+}
