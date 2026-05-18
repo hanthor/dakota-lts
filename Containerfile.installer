@@ -4,15 +4,12 @@ FROM quay.io/almalinuxorg/almalinux-bootc:10
 # Install installer dependencies
 RUN dnf install -y \
       newt \
-      lsblk \
       util-linux \
-      gdisk \
       git \
       meson \
       golang \
       tpm2-tools \
       clevis \
-      network-manager \
       openssh-server \
       openssh-clients && \
     dnf clean all
@@ -38,7 +35,6 @@ EOF
 
 # Set root password to empty and configure auto-run
 RUN echo 'root' | passwd --stdin root && \
-    mkdir -p /root && \
     cat >> /root/.bashrc << 'EOF'
 # Auto-run installer on TTY
 if [ -t 0 ]; then
