@@ -1,0 +1,69 @@
+# dakota-lts:uki-nvidia — shim 16.1 → AlmaLinux signed UKI + NVIDIA drivers
+#
+# Full Secure Boot chain: MS CA → AlmaLinux shim → AlmaLinux signed UKI
+# Plus NVIDIA open-source kernel modules (Secure Boot signed by AlmaLinux)
+#
+# The UKI is sealed at build time, but NVIDIA modules are available on disk
+# and load after rootfs pivot. This is the normal configuration for UKI + GPU.
+
+FROM quay.io/almalinuxorg/almalinux-bootc:10 AS alma
+RUN dnf install -y --setopt=install_weak_deps=False kernel-uki-virt && dnf clean all
+
+# Install NVIDIA packages in alma stage so they're available for final image
+RUN dnf install -y almalinux-release-nvidia-driver && \
+    dnf install -y \
+      nvidia-open-kmod \
+      nvidia-driver \
+      nvidia-driver-cuda \
+      nvidia-persistenced \
+      nvidia-modprobe && \
+    dnf clean all
+
+FROM ghcr.io/projectbluefin/dakota:latest
+
+# Remove Dakota kernel; add AlmaLinux kernel + UKI + NVIDIA.
+RUN find /usr/lib/modules -maxdepth 1 -mindepth 1 -type d -exec rm -rf {} +
+COPY --from=alma /usr/lib/modules/ /usr/lib/modules/
+
+# Install NVIDIA packages in final image (for runtime and future kernel updates)
+RUN dnf install -y almalinux-release-nvidia-driver && \
+    dnf install -y \
+      nvidia-driver \
+      nvidia-driver-cuda \
+      nvidia-persistenced \
+      nvidia-modprobe && \
+    dnf clean all && \
+    echo 'add_drivers+=" nvidia nvidia-modeset nvidia-uvm nvidia-drm "' \
+      > /etc/dracut.conf.d/nvidia.conf
+
+# Copy AlmaLinux shim + supporting binaries to the systemd-boot EFI paths.
+# bootc (with --bootloader systemd) will copy systemd-bootx64.efi to both
+# /boot/efi/EFI/systemd/ and /boot/efi/EFI/BOOT/BOOTX64.EFI.
+# We replace those with shim, and shim's LoadOptions point to the UKI.
+COPY --from=alma /usr/lib/bootupd/updates/EFI/almalinux/ /tmp/bootupd-efi/
+RUN mkdir -p /usr/lib/bootc/boot/efi/EFI/systemd && \
+    mkdir -p /usr/lib/bootc/boot/efi/EFI/BOOT && \
+    cp /tmp/bootupd-efi/shimx64.efi /usr/lib/bootc/boot/efi/EFI/systemd/systemd-bootx64.efi && \
+    cp /tmp/bootupd-efi/shimx64.efi /usr/lib/bootc/boot/efi/EFI/BOOT/BOOTX64.EFI
+
+# Place the signed UKI in the standard EFI/Linux discovery path.
+RUN KVER=$(ls /usr/lib/modules | head -1) && \
+    mkdir -p /usr/lib/bootc/boot/efi/EFI/Linux && \
+    cp /usr/lib/modules/${KVER}/vmlinuz-virt.efi \
+       /usr/lib/bootc/boot/efi/EFI/Linux/${KVER}.efi
+
+# Stamp kernel version.
+RUN KVER=$(ls /usr/lib/modules | head -1) && \
+    sed -i "s|^KERNEL_VERSION=.*|KERNEL_VERSION=\"${KVER}\"|" /usr/lib/os-release 2>/dev/null || \
+    echo "KERNEL_VERSION=\"${KVER}\"" >> /usr/lib/os-release
+
+# Debug SSH (optional).
+ARG SSH_PUBKEY=""
+RUN if [ -n "$SSH_PUBKEY" ]; then \
+      systemctl enable sshd.service \
+   && mkdir -p /var/roothome/.ssh \
+   && echo "$SSH_PUBKEY" > /var/roothome/.ssh/authorized_keys \
+   && chmod 700 /var/roothome/.ssh && chmod 600 /var/roothome/.ssh/authorized_keys \
+   && printf 'PermitRootLogin prohibit-password\n' \
+        > /etc/ssh/sshd_config.d/99-testing.conf; \
+    fi

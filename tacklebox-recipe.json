@@ -1,0 +1,22 @@
+{
+  "media_name": "Dakota-LTS-Installer-ISO",
+  "shared_store": {
+    "format": "ext4",
+    "compression": "zstd"
+  },
+  "bootable_environments": [
+    {
+      "id": "installer",
+      "image": "ghcr.io/hanthor/dakota-lts-installer:latest",
+      "modes": ["live"]
+    }
+  ],
+  "offline_payloads": [
+    "ghcr.io/hanthor/dakota-lts:latest",
+    "ghcr.io/hanthor/dakota-lts:sdboot",
+    "ghcr.io/hanthor/dakota-lts:uki",
+    "ghcr.io/hanthor/dakota-lts:latest-nvidia",
+    "ghcr.io/hanthor/dakota-lts:sdboot-nvidia",
+    "ghcr.io/hanthor/dakota-lts:uki-nvidia"
+  ]
+}

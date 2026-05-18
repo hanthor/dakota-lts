@@ -1,0 +1,141 @@
+name: Build Dakota-LTS Installer ISO
+
+on:
+  workflow_run:
+    workflows: ["Build dakota-lts"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      upload_release:
+        description: "Upload to GitHub Release"
+        required: false
+        default: "true"
+
+env:
+  IMAGE_REGISTRY: ghcr.io/${{ github.repository_owner }}
+
+jobs:
+  build-iso:
+    name: Build Installer ISO
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            xorriso \
+            squashfs-tools \
+            meson \
+            golang-any \
+            git \
+            podman
+
+      - name: Build tacklebox from source
+        run: |
+          git clone https://github.com/tuna-os/tacklebox.git /tmp/tacklebox
+          cd /tmp/tacklebox
+          meson setup build
+          meson install -C build --skip-subprojects
+          tacklebox --version || echo "tacklebox installed (version check may not be available)"
+
+      - name: Login to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+            podman login ghcr.io --username ${{ github.actor }} --password-stdin
+
+      - name: Pre-pull container images
+        run: |
+          set -x
+          podman pull ${{ env.IMAGE_REGISTRY }}/dakota-lts:latest
+          podman pull ${{ env.IMAGE_REGISTRY }}/dakota-lts:sdboot
+          podman pull ${{ env.IMAGE_REGISTRY }}/dakota-lts:uki
+          podman pull ${{ env.IMAGE_REGISTRY }}/dakota-lts:latest-nvidia
+          podman pull ${{ env.IMAGE_REGISTRY }}/dakota-lts:sdboot-nvidia
+          podman pull ${{ env.IMAGE_REGISTRY }}/dakota-lts:uki-nvidia
+          podman pull ${{ env.IMAGE_REGISTRY }}/dakota-lts-installer:latest
+
+      - name: Build ISO with tacklebox
+        run: |
+          set -x
+          mkdir -p /tmp/dakota-iso-build
+          cd /tmp/dakota-iso-build
+
+          # Copy tacklebox recipe
+          cp ${{ github.workspace }}/tacklebox-recipe.json .
+
+          # Build ISO
+          sudo tacklebox build tacklebox-recipe.json \
+            --iso dakota-lts-installer-$(date -u +%Y%m%d).iso \
+            -v
+
+      - name: Verify ISO was created
+        run: |
+          ISO_FILE=$(ls -1 /tmp/dakota-iso-build/*.iso 2>/dev/null | head -1)
+          if [ -z "$ISO_FILE" ]; then
+            echo "Error: ISO file not found in /tmp/dakota-iso-build/"
+            ls -lh /tmp/dakota-iso-build/
+            exit 1
+          fi
+          echo "ISO_FILE=$ISO_FILE" >> $GITHUB_ENV
+          echo "Created: $ISO_FILE"
+          ls -lh "$ISO_FILE"
+
+      - name: Generate ISO metadata
+        run: |
+          ISO_FILE="${{ env.ISO_FILE }}"
+          ISO_NAME=$(basename "$ISO_FILE")
+          ISO_SIZE=$(du -h "$ISO_FILE" | cut -f1)
+          ISO_SHA256=$(sha256sum "$ISO_FILE" | cut -d' ' -f1)
+
+          cat > /tmp/iso-metadata.txt << EOF
+          Dakota-LTS Installer ISO
+          Built: $(date -u)
+
+          File: $ISO_NAME
+          Size: $ISO_SIZE
+          SHA256: $ISO_SHA256
+
+          Included Variants:
+          - dakota-lts:latest (GRUB + Secure Boot)
+          - dakota-lts:sdboot (systemd-boot, bootc switch compatible)
+          - dakota-lts:uki (shim→UKI, full Secure Boot)
+          - dakota-lts:latest-nvidia (GRUB + NVIDIA)
+          - dakota-lts:sdboot-nvidia (systemd-boot + NVIDIA)
+          - dakota-lts:uki-nvidia (UKI + NVIDIA)
+
+          Install: Flash to USB, boot, select variant and target disk
+          Docs: https://github.com/hanthor/dakota-lts
+          EOF
+
+          cat /tmp/iso-metadata.txt
+          cp /tmp/iso-metadata.txt /tmp/dakota-iso-build/
+
+      - name: Upload ISO to GitHub Release
+        if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.ref == 'refs/heads/main')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            ${{ env.ISO_FILE }}
+            /tmp/iso-metadata.txt
+          tag_name: iso-${{ github.run_number }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Summary
+        run: |
+          echo "## Dakota-LTS Installer ISO Build Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**ISO File:** $(basename ${{ env.ISO_FILE }})" >> $GITHUB_STEP_SUMMARY
+          echo "**Size:** $(du -h ${{ env.ISO_FILE }} | cut -f1)" >> $GITHUB_STEP_SUMMARY
+          echo "**SHA256:** $(sha256sum ${{ env.ISO_FILE }} | cut -d' ' -f1)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Variants Included:** 6 (3 base + 3 NVIDIA)" >> $GITHUB_STEP_SUMMARY
+          echo "**Installer:** Minimal live + fisherman + TUI" >> $GITHUB_STEP_SUMMARY

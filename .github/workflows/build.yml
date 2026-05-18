@@ -42,6 +42,22 @@ jobs:
             containerfile: Containerfile.uki
             tag: uki
             description: "shim 16.1 → AlmaLinux signed UKI, no GRUB, full SB"
+          - name: dakota-lts
+            containerfile: Containerfile.nvidia
+            tag: latest-nvidia
+            description: "GRUB + shim Secure Boot + NVIDIA drivers"
+          - name: dakota-lts
+            containerfile: Containerfile.sdboot-nvidia
+            tag: sdboot-nvidia
+            description: "systemd-boot + NVIDIA drivers, bootc switch compatible"
+          - name: dakota-lts
+            containerfile: Containerfile.uki-nvidia
+            tag: uki-nvidia
+            description: "shim→UKI + NVIDIA drivers, full Secure Boot"
+          - name: dakota-lts-installer
+            containerfile: Containerfile.installer
+            tag: latest
+            description: "Minimal live installer image with fisherman + TUI"
 
     steps:
       - name: Checkout repository

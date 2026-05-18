@@ -1,0 +1,101 @@
+# dakota-lts:sdboot-nvidia — AlmaLinux 6.12 LTS kernel + NVIDIA drivers on Dakota's systemd-boot
+#
+# Same as :sdboot but with NVIDIA open-source kernel modules (Secure Boot signed).
+# Supports `bootc switch` from Dakota and composefs-native.
+
+# Stage 1: AlmaLinux 10 — source of signed kernel and modules
+FROM quay.io/almalinuxorg/almalinux-bootc:10 AS alma
+
+# Install NVIDIA packages (will be available for dracut in initramfs-builder)
+RUN dnf install -y almalinux-release-nvidia-driver && \
+    dnf install -y \
+      nvidia-open-kmod \
+      nvidia-driver \
+      nvidia-driver-cuda \
+      nvidia-persistenced \
+      nvidia-modprobe && \
+    dnf clean all
+
+# Stage 2: Dakota — source of bootc dracut module (51bootc)
+FROM ghcr.io/projectbluefin/dakota:latest AS dakota
+
+# Stage 3: Rebuild the AlmaLinux initramfs with bootc + NVIDIA modules
+FROM quay.io/almalinuxorg/almalinux-bootc:10 AS initramfs-builder
+
+# Install NVIDIA packages (for dracut to discover and include in initramfs)
+RUN dnf install -y almalinux-release-nvidia-driver && \
+    dnf install -y \
+      nvidia-open-kmod \
+      nvidia-driver \
+      nvidia-driver-cuda \
+      nvidia-persistenced \
+      nvidia-modprobe && \
+    dnf clean all
+
+# Copy bootc's dracut components from Dakota into the AlmaLinux build env.
+COPY --from=dakota /usr/lib/dracut/modules.d/51bootc/ \
+                   /usr/lib/dracut/modules.d/51bootc/
+COPY --from=dakota /usr/lib/bootc/initramfs-setup \
+                   /usr/lib/bootc/initramfs-setup
+COPY --from=dakota /usr/lib/systemd/system/bootc-root-setup.service \
+                   /usr/lib/systemd/system/bootc-root-setup.service
+
+# Configure dracut for bootc + NVIDIA modules
+RUN mkdir -p /root && \
+    echo 'add_dracutmodules+=" bootc "' > /etc/dracut.conf.d/10-bootc-base.conf && \
+    echo 'add_drivers+=" nvidia nvidia-modeset nvidia-uvm nvidia-drm "' \
+      > /etc/dracut.conf.d/nvidia.conf
+
+# Rebuild initramfs with bootc module + NVIDIA drivers
+RUN KVER=$(ls /usr/lib/modules | head -1) && \
+    dracut --reproducible --force \
+           --no-hostonly \
+           --no-early-microcode \
+           --kver "${KVER}" \
+           /usr/lib/modules/${KVER}/initramfs.img 2>&1 | \
+           grep -Ev "No '/dev/log'|^$"
+
+# Stage 4: Final image — Dakota userspace + AlmaLinux kernel + NVIDIA + rebuilt initramfs
+FROM ghcr.io/projectbluefin/dakota:latest
+
+# Swap kernel: remove Dakota's source-built kernel, drop in AlmaLinux 6.12 LTS + NVIDIA.
+RUN find /usr/lib/modules -maxdepth 1 -mindepth 1 -type d -exec rm -rf {} +
+COPY --from=initramfs-builder /usr/lib/modules/ /usr/lib/modules/
+
+# Install NVIDIA runtime packages in final image
+RUN dnf install -y almalinux-release-nvidia-driver && \
+    dnf install -y \
+      nvidia-driver \
+      nvidia-driver-cuda \
+      nvidia-persistenced \
+      nvidia-modprobe && \
+    dnf clean all
+
+# Bring in bootc dracut components for future initramfs rebuilds
+COPY --from=dakota /usr/lib/dracut/modules.d/51bootc/ \
+                   /usr/lib/dracut/modules.d/51bootc/
+COPY --from=dakota /usr/lib/bootc/initramfs-setup \
+                   /usr/lib/bootc/initramfs-setup
+COPY --from=dakota /usr/lib/systemd/system/bootc-root-setup.service \
+                   /usr/lib/systemd/system/bootc-root-setup.service
+
+# Configure dracut for future rebuilds
+RUN echo 'add_dracutmodules+=" bootc "' > /etc/dracut.conf.d/10-bootc-base.conf && \
+    echo 'add_drivers+=" nvidia nvidia-modeset nvidia-uvm nvidia-drm "' \
+      > /etc/dracut.conf.d/nvidia.conf
+
+# Stamp kernel version into os-release
+RUN KVER=$(ls /usr/lib/modules | head -1) \
+ && sed -i "s|^KERNEL_VERSION=.*|KERNEL_VERSION=\"${KVER}\"|" /usr/lib/os-release 2>/dev/null \
+ || echo "KERNEL_VERSION=\"${KVER}\"" >> /usr/lib/os-release
+
+# Debug builds only: gate with --build-arg SSH_PUBKEY="$(cat ~/.ssh/id_ed25519.pub)"
+ARG SSH_PUBKEY=""
+RUN if [ -n "$SSH_PUBKEY" ]; then \
+      systemctl enable sshd.service \
+   && mkdir -p /var/roothome/.ssh \
+   && echo "$SSH_PUBKEY" > /var/roothome/.ssh/authorized_keys \
+   && chmod 700 /var/roothome/.ssh && chmod 600 /var/roothome/.ssh/authorized_keys \
+   && printf 'PermitRootLogin prohibit-password\n' \
+        > /etc/ssh/sshd_config.d/99-testing.conf; \
+    fi

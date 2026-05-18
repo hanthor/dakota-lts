@@ -1,0 +1,60 @@
+# Minimal installer live image with TUI and fisherman
+FROM quay.io/almalinuxorg/almalinux-bootc:10
+
+# Install installer dependencies
+RUN dnf install -y \
+      newt \
+      lsblk \
+      util-linux \
+      gdisk \
+      git \
+      meson \
+      golang \
+      tpm2-tools \
+      clevis \
+      network-manager \
+      openssh-server \
+      openssh-clients && \
+    dnf clean all
+
+# Build and install fisherman from source
+RUN git clone https://github.com/tuna-os/fisherman.git /tmp/fisherman && \
+    cd /tmp/fisherman && \
+    meson setup build && \
+    meson install -C build && \
+    rm -rf /tmp/fisherman
+
+# Copy installer script
+COPY installer/install.sh /usr/local/bin/dakota-install
+RUN chmod +x /usr/local/bin/dakota-install
+
+# Configure auto-login and installer startup
+RUN mkdir -p /etc/systemd/system/getty@tty1.service.d && \
+    cat > /etc/systemd/system/getty@tty1.service.d/installer.conf << 'EOF'
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin root --noclear %I $TERM
+EOF
+
+# Set root password to empty and configure auto-run
+RUN echo 'root' | passwd --stdin root && \
+    mkdir -p /root && \
+    cat >> /root/.bashrc << 'EOF'
+# Auto-run installer on TTY
+if [ -t 0 ]; then
+  /usr/local/bin/dakota-install
+fi
+EOF
+
+# Stamp installer version
+RUN echo "DAKOTA_INSTALLER_VERSION=1.0.0" >> /usr/lib/os-release
+
+# Enable network for installation
+RUN systemctl enable NetworkManager 2>/dev/null || true
+
+# Minimal bootc config
+RUN bootc container lint
+
+LABEL org.opencontainers.image.title="Dakota-LTS Installer"
+LABEL org.opencontainers.image.description="Minimal live installer for Dakota-LTS bootc variants"
+LABEL org.opencontainers.image.version="1.0.0"

@@ -1,0 +1,75 @@
+# Stage 1: AlmaLinux 10 — source of signed kernel, bootloader chain, and bootupd
+#
+# Provides: AlmaLinux-signed kernel (6.12 LTS), initramfs, modules, shim, GRUB,
+# and bootupd for managing the ESP at install time.
+# Secure Boot chain: MS CA → AlmaLinux shim → AlmaLinux GRUB → AlmaLinux kernel
+FROM quay.io/almalinuxorg/almalinux-bootc:10 AS alma
+# grub2-pc provides the i386-pc modules bootupd needs to write GRUB to the
+# BIOS boot partition that bootc always creates — even on UEFI-only targets.
+RUN dnf install -y --setopt=install_weak_deps=False grub2-pc \
+ && dnf clean all
+
+# Stage 2: Dakota — GNOME OS userspace with AlmaLinux kernel + bootloader + NVIDIA
+FROM ghcr.io/projectbluefin/dakota:latest
+
+# Remove the Dakota source-built kernel.
+# We use a wildcard rm so the version doesn't need to be hard-coded —
+# daily rebuilds from the alma stage pick up whatever kernel AlmaLinux ships.
+RUN find /usr/lib/modules -maxdepth 1 -mindepth 1 -type d -exec rm -rf {} +
+
+# Drop in the AlmaLinux kernel: vmlinuz, initramfs.img, and full module tree.
+COPY --from=alma /usr/lib/modules/ /usr/lib/modules/
+
+# Install NVIDIA open-source kernel modules with Secure Boot signing
+RUN dnf install -y almalinux-release-nvidia-driver && \
+    dnf install -y \
+      nvidia-open-kmod \
+      nvidia-driver \
+      nvidia-driver-cuda \
+      nvidia-persistenced \
+      nvidia-modprobe && \
+    dnf clean all && \
+    echo 'add_drivers+=" nvidia nvidia-modeset nvidia-uvm nvidia-drm "' \
+      > /etc/dracut.conf.d/nvidia.conf
+
+# Drop in bootupd and its static bootloader payload.
+# /usr/lib/bootupd/updates/EFI/ contains the signed shim + GRUB EFI files
+# that bootupd deploys to the ESP when bootc installs the image to disk.
+COPY --from=alma /usr/lib/bootupd/ /usr/lib/bootupd/
+# BIOS grub modules — bootupd installs these to the BIOS boot partition that
+# bootc always creates, even when the target system boots via UEFI.
+COPY --from=alma /usr/lib/grub/i386-pc/ /usr/lib/grub/i386-pc/
+
+# bootupd runs several grub2-tools binaries inside a bwrap container that
+# uses our image as root. We boot UEFI-only so BIOS partition content is
+# irrelevant; stub them all out rather than pulling in AlmaLinux-linked
+# grub2-tools that may be ABI-incompatible with Dakota's userspace.
+RUN for bin in /usr/sbin/grub2-install \
+               /usr/bin/grub2-editenv \
+               /usr/sbin/grub2-mkconfig \
+               /usr/sbin/grub2-mkimage \
+               /usr/sbin/grub2-probe; do \
+      printf '#!/bin/sh\nexit 0\n' > "$bin" && chmod +x "$bin"; \
+    done
+COPY --from=alma /usr/bin/bootupctl /usr/bin/bootupctl
+COPY --from=alma /usr/libexec/bootupd /usr/libexec/bootupd
+
+# Enable sshd for debug builds only (gate with --build-arg SSH_PUBKEY=...).
+# In an ostree/bootc deployment /root → /var/roothome, so authorized_keys
+# must live under /var/roothome to be accessible at runtime.
+# Pass SSH_PUBKEY=$(cat ~/.ssh/id_ed25519.pub) at build time.
+ARG SSH_PUBKEY=""
+RUN if [ -n "$SSH_PUBKEY" ]; then \
+      systemctl enable sshd.service \
+   && mkdir -p /var/roothome/.ssh \
+   && echo "$SSH_PUBKEY" > /var/roothome/.ssh/authorized_keys \
+   && chmod 700 /var/roothome/.ssh \
+   && chmod 600 /var/roothome/.ssh/authorized_keys \
+   && printf 'PermitRootLogin prohibit-password\n' \
+        > /etc/ssh/sshd_config.d/99-testing.conf; \
+    fi
+
+# Stamp the AlmaLinux kernel version into os-release for visibility.
+RUN KVER=$(ls /usr/lib/modules | head -1) \
+ && sed -i "s|^KERNEL_VERSION=.*|KERNEL_VERSION=\"${KVER}\"|" /usr/lib/os-release 2>/dev/null \
+ || echo "KERNEL_VERSION=\"${KVER}\"" >> /usr/lib/os-release
