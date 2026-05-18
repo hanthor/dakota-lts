@@ -1,0 +1,13 @@
+{
+  "disk": "/dev/loop11",
+  "filesystem": "xfs",
+  "composeFsBackend": false,
+  "bootloader": "grub2",
+  "image": "localhost/dakota-lts:uki",
+  "hostname": "dakota-lts-uki",
+  "flatpaks": [],
+  "user": {},
+  "encryption": {
+    "type": "none"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "disk": "/dev/loop11",
+  "filesystem": "xfs",
+  "composeFsBackend": true,
+  "bootloader": "systemd",
+  "image": "localhost/dakota-lts:uki",
+  "hostname": "dakota-lts-test",
+  "flatpaks": [],
+  "user": {},
+  "encryption": {
+    "type": "none"
+  }
+}

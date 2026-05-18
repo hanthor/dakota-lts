@@ -1,66 +1,44 @@
-# dakota-lts:uki — shim 16.1 → AlmaLinux signed UKI, no GRUB, no systemd-boot
+# dakota-lts:uki — shim 16.1 → AlmaLinux signed UKI
 #
 # Secure Boot chain: MS CA → AlmaLinux shim (16.1) → AlmaLinux signed UKI
-# The UKI (vmlinuz-virt.efi) is signed with AlmaLinux's SB cert, which is
-# embedded in AlmaLinux's shim. shim 16.1 added the EFI system-table override
-# that re-verifies the PE image (kernel) inside the UKI — so the full chain
-# is trusted without GRUB, systemd-boot, or any MOK enrollment.
+# The UKI (vmlinuz-virt.efi) is signed with AlmaLinux's SB cert.
+# shim 16.1's system-table override re-verifies the kernel PE inside the UKI.
 #
-# Boot entry: shimx64.efi with LoadOptions pointing to the UKI .efi path.
-# Rollback: two EFI entries + BootNext managed by bootc/efibootmgr.
-#
-# Fresh install only — NOT switchable from Dakota via `bootc switch` because
-# the ESP needs shim + UKI entries which only bootc install sets up.
-FROM quay.io/almalinuxorg/almalinux-bootc:10 AS alma
-# kernel-uki-virt provides the signed vmlinuz-virt.efi UKI
-RUN dnf install -y --setopt=install_weak_deps=False kernel-uki-virt \
- && dnf clean all
+# Strategy: declare systemd-boot (so bootc installs kernel to /boot/loader/entries)
+# but ship shim instead. shim chainloads the UKI, bypassing systemd-boot entirely.
+# Boot entry created by bootc's BLS machinery points to shim as the loader.
 
-# Stage 2: Dakota userspace + AlmaLinux shim + signed UKI
+FROM quay.io/almalinuxorg/almalinux-bootc:10 AS alma
+RUN dnf install -y --setopt=install_weak_deps=False kernel-uki-virt && dnf clean all
+
 FROM ghcr.io/projectbluefin/dakota:latest
 
-# Remove the Dakota source-built kernel.
+# Remove Dakota kernel; add AlmaLinux kernel + UKI.
 RUN find /usr/lib/modules -maxdepth 1 -mindepth 1 -type d -exec rm -rf {} +
-
-# Drop in the full AlmaLinux kernel module tree.
-# vmlinuz-virt.efi (the signed UKI) comes along in this directory.
 COPY --from=alma /usr/lib/modules/ /usr/lib/modules/
 
-# Place the signed UKI where bootc's EFI/Linux auto-discovery path expects it.
-# systemd-boot and direct shim loading both discover UKIs from EFI/Linux/.
-RUN KVER=$(ls /usr/lib/modules | head -1) \
- && mkdir -p /usr/lib/bootc/boot/efi/EFI/Linux \
- && cp /usr/lib/modules/${KVER}/vmlinuz-virt.efi \
+# Copy AlmaLinux shim + supporting binaries to the systemd-boot EFI paths.
+# bootc (with --bootloader systemd) will copy systemd-bootx64.efi to both
+# /boot/efi/EFI/systemd/ and /boot/efi/EFI/BOOT/BOOTX64.EFI.
+# We replace those with shim, and shim's LoadOptions point to the UKI.
+COPY --from=alma /usr/lib/bootupd/updates/EFI/almalinux/ /tmp/bootupd-efi/
+RUN mkdir -p /usr/lib/bootc/boot/efi/EFI/systemd && \
+    mkdir -p /usr/lib/bootc/boot/efi/EFI/BOOT && \
+    cp /tmp/bootupd-efi/shimx64.efi /usr/lib/bootc/boot/efi/EFI/systemd/systemd-bootx64.efi && \
+    cp /tmp/bootupd-efi/shimx64.efi /usr/lib/bootc/boot/efi/EFI/BOOT/BOOTX64.EFI
+
+# Place the signed UKI in the standard EFI/Linux discovery path.
+RUN KVER=$(ls /usr/lib/modules | head -1) && \
+    mkdir -p /usr/lib/bootc/boot/efi/EFI/Linux && \
+    cp /usr/lib/modules/${KVER}/vmlinuz-virt.efi \
        /usr/lib/bootc/boot/efi/EFI/Linux/${KVER}.efi
 
-# Drop in the AlmaLinux shim + GRUB-minimal EFI payload via bootupd.
-# We keep shim here — bootupd will install shimx64.efi to the ESP.
-# shim 16.1 is configured to chainload the UKI when passed via LoadOptions
-# or to fall back to grubx64.efi (which we don't ship — so UKI is the only path).
-COPY --from=alma /usr/lib/bootupd/ /usr/lib/bootupd/
-COPY --from=alma /usr/bin/bootupctl /usr/bin/bootupctl
-COPY --from=alma /usr/libexec/bootupd /usr/libexec/bootupd
-COPY --from=alma /usr/lib/grub/i386-pc/ /usr/lib/grub/i386-pc/
-
-# Stub out grub2 tools (BIOS component only; EFI chain uses UKI, not GRUB).
-RUN for bin in /usr/sbin/grub2-install /usr/bin/grub2-editenv \
-               /usr/sbin/grub2-mkconfig /usr/sbin/grub2-mkimage \
-               /usr/sbin/grub2-probe; do \
-      printf '#!/bin/sh\nexit 0\n' > "$bin" && chmod +x "$bin"; \
-    done \
- && rm -f /usr/lib/bootupd/updates/BIOS.json
-
-# Remove grubx64.efi from the bootupd EFI payload so shim has no GRUB to fall
-# back to — it will only boot the signed UKI. This makes the chain explicit.
-RUN rm -f /usr/lib/bootupd/updates/EFI/almalinux/grubx64.efi \
-          /usr/lib/bootupd/updates/EFI/almalinux/grub.cfg \
-          /usr/lib/bootupd/updates/EFI/almalinux/bootuuid.cfg
-
 # Stamp kernel version.
-RUN KVER=$(ls /usr/lib/modules | head -1) \
- && sed -i "s|^KERNEL_VERSION=.*|KERNEL_VERSION=\"${KVER}\"|" /usr/lib/os-release 2>/dev/null \
- || echo "KERNEL_VERSION=\"${KVER}\"" >> /usr/lib/os-release
+RUN KVER=$(ls /usr/lib/modules | head -1) && \
+    sed -i "s|^KERNEL_VERSION=.*|KERNEL_VERSION=\"${KVER}\"|" /usr/lib/os-release 2>/dev/null || \
+    echo "KERNEL_VERSION=\"${KVER}\"" >> /usr/lib/os-release
 
+# Debug SSH (optional).
 ARG SSH_PUBKEY=""
 RUN if [ -n "$SSH_PUBKEY" ]; then \
       systemctl enable sshd.service \
