@@ -148,11 +148,16 @@ jobs:
           COSIGN_PASSWORD: ""
           DIGEST: ${{ steps.push.outputs.digest }}
           TAG: ${{ matrix.variant.tag }}
+          IMAGE_NAME: ${{ matrix.variant.name }}
         run: |
-          cosign sign -y \
-            --new-bundle-format=false \
-            --use-signing-config=false \
-            --key env://COSIGN_PRIVATE_KEY \
-            --registry-username ${{ github.actor }} \
-            --registry-password ${{ secrets.GITHUB_TOKEN }} \
-            "${{ env.IMAGE_REGISTRY }}/${{ matrix.variant.name }}:${TAG}"
+          for attempt in 1 2 3; do
+            cosign sign -y \
+              --new-bundle-format=false \
+              --use-signing-config=false \
+              --key env://COSIGN_PRIVATE_KEY \
+              --registry-username ${{ github.actor }} \
+              --registry-password ${{ secrets.GITHUB_TOKEN }} \
+              "${IMAGE_REGISTRY}/${IMAGE_NAME}:${TAG}" && break
+            echo "Cosign sign attempt ${attempt} failed, retrying..."
+            sleep $((attempt * 5))
+          done
