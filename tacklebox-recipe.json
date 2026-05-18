@@ -7,7 +7,7 @@
   "bootable_environments": [
     {
       "id": "installer",
-      "image": "ghcr.io/hanthor/dakota-lts-installer:latest",
+      "image": "ghcr.io/hanthor/dakota-lts:uki-nvidia",
       "modes": ["live"]
     }
   ],
@@ -16,7 +16,6 @@
     "ghcr.io/hanthor/dakota-lts:sdboot",
     "ghcr.io/hanthor/dakota-lts:uki",
     "ghcr.io/hanthor/dakota-lts:latest-nvidia",
-    "ghcr.io/hanthor/dakota-lts:sdboot-nvidia",
-    "ghcr.io/hanthor/dakota-lts:uki-nvidia"
+    "ghcr.io/hanthor/dakota-lts:sdboot-nvidia"
   ]
 }
