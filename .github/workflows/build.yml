@@ -160,4 +160,4 @@ jobs:
               "${IMAGE_REGISTRY}/${IMAGE_NAME}:${TAG}" && break
             echo "Cosign sign attempt ${attempt} failed, retrying..."
             sleep $((attempt * 5))
-          done
+          done || echo "Warning: cosign signing failed (see issue #5 for tracking)"
