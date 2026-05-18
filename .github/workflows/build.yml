@@ -60,17 +60,24 @@ jobs:
           echo "Detected AlmaLinux kernel: ${KVER}"
 
       - name: Build image (${{ matrix.variant.tag }})
+        env:
+          CONTAINERFILE: ${{ matrix.variant.containerfile }}
+          TAG: ${{ matrix.variant.tag }}
+          KVER: ${{ steps.kver.outputs.kver }}
+          TIMESTAMP: ${{ steps.timestamp.outputs.created }}
+          DESCRIPTION: ${{ matrix.variant.description }}
+          NAME: ${{ matrix.variant.name }}
         run: |
           podman build \
             --pull=newer \
-            -f ${{ matrix.variant.containerfile }} \
-            --label org.opencontainers.image.created=${{ steps.timestamp.outputs.created }} \
-            --label org.opencontainers.image.revision=${{ github.sha }} \
-            --label org.opencontainers.image.version=${{ steps.kver.outputs.kver }} \
-            --label org.opencontainers.image.description="${{ matrix.variant.description }}" \
-            --label org.projectbluefin.alma.kernel=${{ steps.kver.outputs.kver }} \
-            --label org.projectbluefin.alma.variant=${{ matrix.variant.tag }} \
-            -t "${{ matrix.variant.name }}:${{ matrix.variant.tag }}" \
+            -f "${CONTAINERFILE}" \
+            --label org.opencontainers.image.created="${TIMESTAMP}" \
+            --label org.opencontainers.image.revision="${{ github.sha }}" \
+            --label org.opencontainers.image.version="${KVER}" \
+            --label org.opencontainers.image.description="${DESCRIPTION}" \
+            --label org.projectbluefin.alma.kernel="${KVER}" \
+            --label org.projectbluefin.alma.variant="${TAG}" \
+            -t "${NAME}:${TAG}" \
             .
 
       - name: Validate with bootc container lint
