@@ -41,8 +41,8 @@ jobs:
         run: |
           git clone https://github.com/tuna-os/tacklebox.git /tmp/tacklebox
           cd /tmp/tacklebox
-          meson setup build
-          meson install -C build --skip-subprojects
+          go build -o /usr/local/bin/tacklebox ./cmd/tacklebox
+          
           tacklebox --version || echo "tacklebox installed (version check may not be available)"
 
       - name: Login to GHCR
